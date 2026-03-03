@@ -1,0 +1,27 @@
+{
+  "name": "gpu-inference-api",
+  "version": "1.0.0",
+  "description": "Secure GPU inference microservice for enterprise grading system",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop gpu-inference-api",
+    "pm2:restart": "pm2 restart gpu-inference-api",
+    "pm2:logs": "pm2 logs gpu-inference-api",
+    "pm2:monit": "pm2 monit"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "node-fetch": "^3.3.2",
+    "pino": "^9.4.0",
+    "pino-pretty": "^11.2.2"
+  },
+  "devDependencies": {},
+  "private": true
+}

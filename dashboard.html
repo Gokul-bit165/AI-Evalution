@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPU Inference — Monitoring Dashboard</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg-primary:   #0f1117;
+    --bg-secondary: #161922;
+    --bg-card:      #1c1f2e;
+    --bg-card-alt:  #232738;
+    --border:       #2a2e3f;
+    --text-primary: #e4e6f0;
+    --text-muted:   #8b8fa3;
+    --accent-blue:  #3b82f6;
+    --accent-green: #22c55e;
+    --accent-amber: #f59e0b;
+    --accent-red:   #ef4444;
+    --accent-cyan:  #06b6d4;
+    --accent-purple:#a855f7;
+    --radius:       12px;
+    --shadow:       0 4px 24px rgba(0,0,0,0.25);
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    line-height: 1.5;
+  }
+
+  /* ── Header ──────────────────────────────────────────────── */
+  .header {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header-left { display: flex; align-items: center; gap: 12px; }
+  .header-left h1 { font-size: 18px; font-weight: 600; letter-spacing: -0.3px; }
+  .header-left .badge {
+    font-size: 11px; font-weight: 600; padding: 3px 10px;
+    border-radius: 999px; text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .badge-online  { background: rgba(34,197,94,0.15); color: var(--accent-green); }
+  .badge-offline { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+  .badge-busy    { background: rgba(245,158,11,0.15); color: var(--accent-amber); }
+
+  .header-right { display: flex; align-items: center; gap: 16px; }
+  .header-right .refresh-indicator {
+    font-size: 12px; color: var(--text-muted);
+  }
+  .header-right .dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    margin-right: 6px; animation: pulse 2s infinite;
+  }
+  .dot-green { background: var(--accent-green); }
+  .dot-red   { background: var(--accent-red); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* ── Error Banner ────────────────────────────────────────── */
+  .error-banner {
+    background: rgba(239,68,68,0.1);
+    border: 1px solid rgba(239,68,68,0.3);
+    color: var(--accent-red);
+    padding: 12px 32px;
+    font-size: 13px;
+    display: none;
+    align-items: center;
+    gap: 8px;
+  }
+  .error-banner.visible { display: flex; }
+
+  /* ── Auth Form ───────────────────────────────────────────── */
+  .auth-overlay {
+    position: fixed; inset: 0; z-index: 999;
+    background: var(--bg-primary);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .auth-overlay.hidden { display: none; }
+  .auth-box {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 40px;
+    width: 100%; max-width: 420px;
+    text-align: center;
+  }
+  .auth-box h2 { font-size: 20px; margin-bottom: 8px; }
+  .auth-box p { font-size: 13px; color: var(--text-muted); margin-bottom: 24px; }
+  .auth-box input {
+    width: 100%; padding: 10px 14px;
+    background: var(--bg-primary); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--text-primary); font-size: 14px;
+    outline: none; margin-bottom: 16px;
+    font-family: 'Consolas', 'Monaco', monospace;
+  }
+  .auth-box input:focus { border-color: var(--accent-blue); }
+  .auth-box button {
+    width: 100%; padding: 10px;
+    background: var(--accent-blue); color: #fff; border: none;
+    border-radius: 8px; font-size: 14px; font-weight: 600;
+    cursor: pointer; transition: opacity 0.15s;
+  }
+  .auth-box button:hover { opacity: 0.9; }
+  .auth-error {
+    color: var(--accent-red); font-size: 12px;
+    margin-top: 12px; display: none;
+  }
+
+  /* ── Main Layout ─────────────────────────────────────────── */
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px 24px 48px; }
+
+  .section-label {
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 1px; color: var(--text-muted); margin-bottom: 12px;
+    padding-left: 4px;
+  }
+
+  /* ── Grid ────────────────────────────────────────────────── */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 16px;
+    margin-bottom: 28px;
+  }
+
+  /* ── Cards ───────────────────────────────────────────────── */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 24px;
+    transition: border-color 0.2s;
+    position: relative;
+    overflow: hidden;
+  }
+  .card:hover { border-color: rgba(59,130,246,0.3); }
+  .card-icon {
+    width: 36px; height: 36px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; margin-bottom: 14px;
+  }
+  .card-label {
+    font-size: 12px; font-weight: 500; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
+  }
+  .card-value {
+    font-size: 28px; font-weight: 700; letter-spacing: -1px;
+    line-height: 1.1;
+  }
+  .card-sub {
+    font-size: 12px; color: var(--text-muted); margin-top: 6px;
+  }
+
+  .icon-gpu    { background: rgba(59,130,246,0.12); color: var(--accent-blue); }
+  .icon-vram   { background: rgba(168,85,247,0.12); color: var(--accent-purple); }
+  .icon-temp   { background: rgba(245,158,11,0.12); color: var(--accent-amber); }
+  .icon-active { background: rgba(6,182,212,0.12);  color: var(--accent-cyan); }
+  .icon-done   { background: rgba(34,197,94,0.12);  color: var(--accent-green); }
+  .icon-fail   { background: rgba(239,68,68,0.12);  color: var(--accent-red); }
+  .icon-time   { background: rgba(59,130,246,0.12); color: var(--accent-blue); }
+  .icon-up     { background: rgba(34,197,94,0.12);  color: var(--accent-green); }
+
+  /* ── Progress Bar ────────────────────────────────────────── */
+  .progress-track {
+    width: 100%; height: 8px; background: var(--bg-primary);
+    border-radius: 4px; margin-top: 12px; overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%; border-radius: 4px;
+    transition: width 0.6s ease, background 0.3s;
+    min-width: 0%;
+  }
+  .pf-low  { background: var(--accent-green); }
+  .pf-mid  { background: var(--accent-amber); }
+  .pf-high { background: var(--accent-red); }
+
+  /* ── Temperature Color ───────────────────────────────────── */
+  .temp-cool   { color: var(--accent-green); }
+  .temp-warm   { color: var(--accent-amber); }
+  .temp-hot    { color: var(--accent-red); }
+
+  /* ── Active Request State ────────────────────────────────── */
+  .state-idle { color: var(--accent-green); }
+  .state-busy { color: var(--accent-amber); }
+
+  /* ── Wide card for VRAM ──────────────────────────────────── */
+  .card-wide { grid-column: span 2; }
+
+  /* ── Footer ──────────────────────────────────────────────── */
+  .footer {
+    text-align: center; padding: 16px;
+    font-size: 11px; color: var(--text-muted);
+    border-top: 1px solid var(--border);
+  }
+
+  /* ── Responsive ──────────────────────────────────────────── */
+  @media (max-width: 640px) {
+    .header { padding: 12px 16px; }
+    .container { padding: 16px; }
+    .grid { grid-template-columns: 1fr; }
+    .card-wide { grid-column: span 1; }
+    .card-value { font-size: 24px; }
+  }
+
+  /* ── Skeleton Loading ────────────────────────────────────── */
+  .skeleton .card-value,
+  .skeleton .card-sub {
+    background: var(--bg-card-alt);
+    color: transparent;
+    border-radius: 4px;
+    animation: shimmer 1.5s infinite;
+  }
+  @keyframes shimmer {
+    0%   { opacity: 0.6; }
+    50%  { opacity: 0.3; }
+    100% { opacity: 0.6; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Auth Overlay ──────────────────────────────────────── -->
+<div class="auth-overlay" id="authOverlay">
+  <div class="auth-box">
+    <h2>🔐 GPU Dashboard</h2>
+    <p>Enter your API key to access monitoring</p>
+    <input type="password" id="authKeyInput" placeholder="x-api-key" autocomplete="off" spellcheck="false">
+    <button id="authBtn">Authenticate</button>
+    <div class="auth-error" id="authError">Invalid API key — access denied</div>
+  </div>
+</div>
+
+<!-- ── Header ────────────────────────────────────────────── -->
+<header class="header">
+  <div class="header-left">
+    <h1>⚡ GPU Inference Monitor</h1>
+    <span class="badge badge-online" id="statusBadge">Connecting…</span>
+  </div>
+  <div class="header-right">
+    <span class="refresh-indicator">
+      <span class="dot dot-green" id="refreshDot"></span>
+      <span id="refreshText">Refreshing every 5s</span>
+    </span>
+  </div>
+</header>
+
+<!-- ── Error Banner ──────────────────────────────────────── -->
+<div class="error-banner" id="errorBanner">
+  <span>⚠</span>
+  <span id="errorMessage">Failed to fetch metrics</span>
+</div>
+
+<!-- ── Dashboard Content ─────────────────────────────────── -->
+<main class="container" id="dashboard">
+
+  <!-- GPU Section -->
+  <div class="section-label">GPU Hardware</div>
+  <div class="grid">
+
+    <div class="card" id="cardGpu">
+      <div class="card-icon icon-gpu">⚙</div>
+      <div class="card-label">GPU Utilization</div>
+      <div class="card-value" id="gpuUtil">—%</div>
+      <div class="card-sub">RTX 3060 • Compute</div>
+    </div>
+
+    <div class="card card-wide" id="cardVram">
+      <div class="card-icon icon-vram">🧠</div>
+      <div class="card-label">VRAM Usage</div>
+      <div class="card-value" id="vramText">— / — MB</div>
+      <div class="progress-track">
+        <div class="progress-fill pf-low" id="vramBar" style="width: 0%"></div>
+      </div>
+      <div class="card-sub" id="vramPercent">0% used</div>
+    </div>
+
+    <div class="card" id="cardTemp">
+      <div class="card-icon icon-temp">🌡</div>
+      <div class="card-label">Temperature</div>
+      <div class="card-value temp-cool" id="gpuTemp">—°C</div>
+      <div class="card-sub">Safe &lt; 80°C</div>
+    </div>
+
+  </div>
+
+  <!-- Server Section -->
+  <div class="section-label">Inference Server</div>
+  <div class="grid">
+
+    <div class="card" id="cardActive">
+      <div class="card-icon icon-active">📡</div>
+      <div class="card-label">Active Requests</div>
+      <div class="card-value state-idle" id="activeReqs">—</div>
+      <div class="card-sub" id="activeSub">Max concurrent: 1</div>
+    </div>
+
+    <div class="card" id="cardProcessed">
+      <div class="card-icon icon-done">✅</div>
+      <div class="card-label">Total Processed</div>
+      <div class="card-value" id="totalProcessed">—</div>
+      <div class="card-sub">Successful evaluations</div>
+    </div>
+
+    <div class="card" id="cardFailed">
+      <div class="card-icon icon-fail">❌</div>
+      <div class="card-label">Total Failed</div>
+      <div class="card-value" id="totalFailed">—</div>
+      <div class="card-sub" id="failRate">0% failure rate</div>
+    </div>
+
+    <div class="card" id="cardAvg">
+      <div class="card-icon icon-time">⏱</div>
+      <div class="card-label">Avg Response Time</div>
+      <div class="card-value" id="avgTime">—ms</div>
+      <div class="card-sub">Rolling average</div>
+    </div>
+
+    <div class="card" id="cardUptime">
+      <div class="card-icon icon-up">🟢</div>
+      <div class="card-label">Server Uptime</div>
+      <div class="card-value" id="uptime">—</div>
+      <div class="card-sub" id="uptimeSub">Process running</div>
+    </div>
+
+    <div class="card" id="cardMemory">
+      <div class="card-icon icon-vram">💾</div>
+      <div class="card-label">Process Memory</div>
+      <div class="card-value" id="procMem">— MB</div>
+      <div class="card-sub">Node.js RSS</div>
+    </div>
+
+  </div>
+
+</main>
+
+<footer class="footer">
+  GPU Inference Monitoring Dashboard &mdash; Internal Use Only &mdash; <span id="footerTime"></span>
+</footer>
+
+<script>
+(function() {
+  'use strict';
+
+  // ── State ──────────────────────────────────────────────
+  let apiKey = '';
+  let refreshTimer = null;
+  const REFRESH_MS = 5000;
+  const BASE_URL = window.location.origin;
+
+  // ── DOM Refs ───────────────────────────────────────────
+  const $ = (id) => document.getElementById(id);
+  const authOverlay   = $('authOverlay');
+  const authKeyInput  = $('authKeyInput');
+  const authBtn       = $('authBtn');
+  const authError     = $('authError');
+  const statusBadge   = $('statusBadge');
+  const refreshDot    = $('refreshDot');
+  const errorBanner   = $('errorBanner');
+  const errorMessage  = $('errorMessage');
+
+  // ── Auth ───────────────────────────────────────────────
+  const savedKey = sessionStorage.getItem('gpu_dash_key');
+  if (savedKey) {
+    apiKey = savedKey;
+    authOverlay.classList.add('hidden');
+    startDashboard();
+  }
+
+  authBtn.addEventListener('click', attemptAuth);
+  authKeyInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') attemptAuth();
+  });
+
+  async function attemptAuth() {
+    const key = authKeyInput.value.trim();
+    if (!key) return;
+
+    authBtn.textContent = 'Verifying…';
+    authBtn.disabled = true;
+
+    try {
+      const res = await fetch(BASE_URL + '/internal/status', {
+        headers: { 'x-api-key': key },
+      });
+
+      if (res.ok) {
+        apiKey = key;
+        sessionStorage.setItem('gpu_dash_key', key);
+        authOverlay.classList.add('hidden');
+        authError.style.display = 'none';
+        startDashboard();
+      } else {
+        authError.style.display = 'block';
+      }
+    } catch {
+      authError.textContent = 'Connection failed — is the server running?';
+      authError.style.display = 'block';
+    } finally {
+      authBtn.textContent = 'Authenticate';
+      authBtn.disabled = false;
+    }
+  }
+
+  // ── Dashboard Loop ─────────────────────────────────────
+  function startDashboard() {
+    fetchAll();
+    refreshTimer = setInterval(fetchAll, REFRESH_MS);
+  }
+
+  async function fetchAll() {
+    const headers = { 'x-api-key': apiKey };
+    const opts = { headers, signal: AbortSignal.timeout(8000) };
+
+    try {
+      const [statusRes, gpuRes] = await Promise.allSettled([
+        fetch(BASE_URL + '/internal/status', opts),
+        fetch(BASE_URL + '/internal/gpu', opts),
+      ]);
+
+      let statusOk = false;
+      let gpuOk = false;
+
+      if (statusRes.status === 'fulfilled' && statusRes.value.ok) {
+        const data = await statusRes.value.json();
+        renderStatus(data);
+        statusOk = true;
+      }
+
+      if (gpuRes.status === 'fulfilled' && gpuRes.value.ok) {
+        const data = await gpuRes.value.json();
+        renderGpu(data);
+        gpuOk = true;
+      }
+
+      if (statusOk || gpuOk) {
+        hideError();
+        if (statusRes.status === 'fulfilled' && statusRes.value.status === 401) {
+          sessionStorage.removeItem('gpu_dash_key');
+          authOverlay.classList.remove('hidden');
+          clearInterval(refreshTimer);
+          return;
+        }
+      }
+
+      if (!statusOk && !gpuOk) {
+        throw new Error('Both endpoints failed');
+      }
+
+      $('footerTime').textContent = new Date().toLocaleTimeString();
+
+    } catch (err) {
+      showError(err.message || 'Failed to fetch metrics');
+      setBadge('offline');
+    }
+  }
+
+  // ── Render Functions ───────────────────────────────────
+  function renderStatus(d) {
+    // Active requests
+    const active = d.activeRequests ?? 0;
+    const max = d.maxConcurrent ?? 1;
+    $('activeReqs').textContent = active;
+    $('activeSub').textContent = `Max concurrent: ${max}`;
+
+    if (active >= max) {
+      $('activeReqs').className = 'card-value state-busy';
+      setBadge('busy');
+    } else {
+      $('activeReqs').className = 'card-value state-idle';
+      setBadge('online');
+    }
+
+    // Processed
+    $('totalProcessed').textContent = formatNumber(d.totalProcessed ?? 0);
+
+    // Failed
+    const failed = d.totalFailed ?? 0;
+    const total = (d.totalProcessed ?? 0) + failed;
+    $('totalFailed').textContent = formatNumber(failed);
+    const failPct = total > 0 ? ((failed / total) * 100).toFixed(1) : '0.0';
+    $('failRate').textContent = `${failPct}% failure rate`;
+
+    // Avg response time
+    const avg = d.averageResponseTime ?? 0;
+    $('avgTime').textContent = avg > 1000 ? (avg / 1000).toFixed(1) + 's' : avg + 'ms';
+
+    // Uptime
+    const secs = d.uptimeSeconds ?? 0;
+    $('uptime').textContent = formatUptime(secs);
+    $('uptimeSub').textContent = `PID running since ${formatDuration(secs)} ago`;
+
+    // Process memory
+    $('procMem').textContent = (d.memoryUsageMB ?? 0) + ' MB';
+  }
+
+  function renderGpu(d) {
+    // GPU utilization
+    if (d.error) {
+      $('gpuUtil').textContent = 'N/A';
+      $('gpuTemp').textContent = 'N/A';
+      $('vramText').textContent = 'nvidia-smi unavailable';
+      $('vramBar').style.width = '0%';
+      $('vramPercent').textContent = d.error;
+      return;
+    }
+
+    const util = d.gpuUtilization ?? 0;
+    $('gpuUtil').textContent = util + '%';
+
+    // VRAM
+    const used = d.memoryUsedMB ?? 0;
+    const total = d.memoryTotalMB ?? 1;
+    const pct = Math.round((used / total) * 100);
+    $('vramText').textContent = `${formatNumber(used)} / ${formatNumber(total)} MB`;
+    $('vramBar').style.width = pct + '%';
+    $('vramPercent').textContent = pct + '% used';
+
+    // VRAM bar color
+    const bar = $('vramBar');
+    bar.classList.remove('pf-low', 'pf-mid', 'pf-high');
+    if (pct < 60) bar.classList.add('pf-low');
+    else if (pct < 85) bar.classList.add('pf-mid');
+    else bar.classList.add('pf-high');
+
+    // Temperature
+    const temp = d.temperatureC ?? 0;
+    const tempEl = $('gpuTemp');
+    tempEl.textContent = temp + '°C';
+    tempEl.classList.remove('temp-cool', 'temp-warm', 'temp-hot');
+    if (temp < 60) tempEl.classList.add('temp-cool');
+    else if (temp < 80) tempEl.classList.add('temp-warm');
+    else tempEl.classList.add('temp-hot');
+  }
+
+  // ── Badge ──────────────────────────────────────────────
+  function setBadge(state) {
+    statusBadge.classList.remove('badge-online', 'badge-offline', 'badge-busy');
+    refreshDot.classList.remove('dot-green', 'dot-red');
+
+    switch (state) {
+      case 'online':
+        statusBadge.textContent = 'Online';
+        statusBadge.classList.add('badge-online');
+        refreshDot.classList.add('dot-green');
+        break;
+      case 'busy':
+        statusBadge.textContent = 'GPU Busy';
+        statusBadge.classList.add('badge-busy');
+        refreshDot.classList.add('dot-green');
+        break;
+      case 'offline':
+        statusBadge.textContent = 'Offline';
+        statusBadge.classList.add('badge-offline');
+        refreshDot.classList.add('dot-red');
+        break;
+    }
+  }
+
+  // ── Error Banner ───────────────────────────────────────
+  function showError(msg) {
+    errorMessage.textContent = msg;
+    errorBanner.classList.add('visible');
+  }
+
+  function hideError() {
+    errorBanner.classList.remove('visible');
+  }
+
+  // ── Formatters ─────────────────────────────────────────
+  function formatNumber(n) {
+    return Number(n).toLocaleString();
+  }
+
+  function formatUptime(totalSeconds) {
+    const d = Math.floor(totalSeconds / 86400);
+    const h = Math.floor((totalSeconds % 86400) / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
+    const s = totalSeconds % 60;
+
+    if (d > 0) return `${d}d ${h}h ${m}m`;
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  function formatDuration(totalSeconds) {
+    const d = Math.floor(totalSeconds / 86400);
+    const h = Math.floor((totalSeconds % 86400) / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
+
+    const parts = [];
+    if (d > 0) parts.push(`${d} day${d > 1 ? 's' : ''}`);
+    if (h > 0) parts.push(`${h} hr${h > 1 ? 's' : ''}`);
+    if (m > 0) parts.push(`${m} min`);
+    return parts.length > 0 ? parts.join(', ') : 'just now';
+  }
+
+})();
+</script>
+</body>
+</html>

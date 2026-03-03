@@ -3,8 +3,9 @@
 const express = require('express');
 const fetch = require('node-fetch');
 const pino = require('pino');
-const { exec } = require('child_process');
+const { spawn } = require('child_process');
 const path = require('path');
+const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 // =============================================================================
@@ -134,62 +135,96 @@ class RequestMetrics {
 const requestMetrics = new RequestMetrics();
 
 // =============================================================================
-// GPU METRICS COLLECTOR
+// GPU METRICS COLLECTOR (spawn-based, no memory buffering)
 // =============================================================================
+
+const GPU_NULL_RESPONSE = Object.freeze({
+  gpuUtilization: null,
+  memoryUsedMB: null,
+  memoryTotalMB: null,
+  temperatureC: null,
+});
 
 function getGpuMetrics() {
   return new Promise((resolve) => {
-    const cmd =
-      process.platform === 'win32'
-        ? 'nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits'
-        : 'nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits';
+    let output = '';
+    let killed = false;
+
+    const proc = spawn('nvidia-smi', [
+      '--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu',
+      '--format=csv,noheader,nounits',
+    ]);
 
     const timeout = setTimeout(() => {
-      resolve({
-        error: 'nvidia-smi timeout',
-        gpuUtilization: null,
-        memoryUsedMB: null,
-        memoryTotalMB: null,
-        temperatureC: null,
-      });
+      killed = true;
+      proc.kill('SIGKILL');
+      logger.warn('nvidia-smi killed after 5s timeout');
+      resolve({ error: 'nvidia-smi timeout', ...GPU_NULL_RESPONSE });
     }, 5000);
 
-    exec(cmd, { timeout: 5000 }, (error, stdout, stderr) => {
-      clearTimeout(timeout);
+    proc.stdout.on('data', (chunk) => {
+      output += chunk.toString();
+    });
 
-      if (error) {
-        logger.warn({ error: error.message }, 'nvidia-smi failed');
-        return resolve({
-          error: error.message,
-          gpuUtilization: null,
-          memoryUsedMB: null,
-          memoryTotalMB: null,
-          temperatureC: null,
-        });
+    proc.stderr.on('data', (chunk) => {
+      logger.debug({ stderr: chunk.toString() }, 'nvidia-smi stderr');
+    });
+
+    proc.on('error', (err) => {
+      clearTimeout(timeout);
+      logger.warn({ error: err.message }, 'nvidia-smi spawn failed');
+      resolve({ error: err.message, ...GPU_NULL_RESPONSE });
+    });
+
+    proc.on('close', (code) => {
+      clearTimeout(timeout);
+      if (killed) return; // already resolved
+
+      if (code !== 0 || !output.trim()) {
+        logger.warn({ code }, 'nvidia-smi exited with non-zero code');
+        return resolve({ error: 'GPU metrics unavailable', ...GPU_NULL_RESPONSE });
       }
 
       try {
-        const parts = stdout.trim().split(',').map((s) => s.trim());
-        if (parts.length < 4) throw new Error('Unexpected nvidia-smi output');
+        const parts = output.trim().split(',').map((s) => s.trim());
+        if (parts.length < 4) throw new Error('Unexpected nvidia-smi output format');
+
+        const [util, memUsed, memTotal, temp] = parts.map((v) => parseFloat(v));
+
+        if ([util, memUsed, memTotal, temp].some((v) => isNaN(v))) {
+          throw new Error('Non-numeric value in nvidia-smi output');
+        }
 
         resolve({
-          gpuUtilization: parseInt(parts[0], 10) || 0,
-          memoryUsedMB: parseInt(parts[1], 10) || 0,
-          memoryTotalMB: parseInt(parts[2], 10) || 0,
-          temperatureC: parseInt(parts[3], 10) || 0,
+          gpuUtilization: Math.round(util),
+          memoryUsedMB: Math.round(memUsed),
+          memoryTotalMB: Math.round(memTotal),
+          temperatureC: Math.round(temp),
         });
       } catch (parseError) {
-        logger.warn({ error: parseError.message, stdout }, 'nvidia-smi parse failed');
-        resolve({
-          error: parseError.message,
-          gpuUtilization: null,
-          memoryUsedMB: null,
-          memoryTotalMB: null,
-          temperatureC: null,
-        });
+        logger.warn({ error: parseError.message, raw: output.slice(0, 200) }, 'nvidia-smi parse failed');
+        resolve({ error: parseError.message, ...GPU_NULL_RESPONSE });
       }
     });
   });
+}
+
+// =============================================================================
+// GPU METRICS CACHE (prevents nvidia-smi query storms)
+// =============================================================================
+
+const GPU_CACHE_TTL_MS = 3000;
+let gpuCache = null;
+let gpuCacheTime = 0;
+
+async function getCachedGpuMetrics() {
+  const now = Date.now();
+  if (gpuCache && now - gpuCacheTime < GPU_CACHE_TTL_MS) {
+    return gpuCache;
+  }
+  gpuCache = await getGpuMetrics();
+  gpuCacheTime = now;
+  return gpuCache;
 }
 
 // =============================================================================
@@ -543,6 +578,20 @@ app.post('/evaluate', authenticate, async (req, res) => {
 // INTERNAL MONITORING ROUTES
 // =============================================================================
 
+// Rate limiter: max 20 requests per 15s window per IP
+const internalLimiter = rateLimit({
+  windowMs: 15 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: 'Too Many Requests',
+    message: 'Rate limit exceeded for monitoring endpoints',
+  },
+});
+
+app.use('/internal', internalLimiter);
+
 // Server status
 app.get('/internal/status', authenticate, (req, res) => {
   const guard = concurrencyGuard.getStats();
@@ -561,10 +610,10 @@ app.get('/internal/status', authenticate, (req, res) => {
   });
 });
 
-// GPU metrics
+// GPU metrics (cached — 3s TTL prevents nvidia-smi storms)
 app.get('/internal/gpu', authenticate, async (req, res) => {
   try {
-    const gpu = await getGpuMetrics();
+    const gpu = await getCachedGpuMetrics();
     res.json(gpu);
   } catch (error) {
     logger.error({ error: error.message }, 'GPU metrics error');

@@ -1,0 +1,1200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Evaluation Monitor — GPU Inference</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg-primary:   #0a0c10;
+    --bg-secondary: #111318;
+    --bg-card:      #161a24;
+    --bg-card-alt:  #1c2030;
+    --bg-hover:     #1e2235;
+    --border:       #252a3a;
+    --border-light: #2f3548;
+    --text-primary: #e8eaf0;
+    --text-muted:   #7d8399;
+    --text-dim:     #555b70;
+    --accent-blue:  #4f8ff7;
+    --accent-green: #34d399;
+    --accent-amber: #fbbf24;
+    --accent-red:   #f87171;
+    --accent-cyan:  #22d3ee;
+    --accent-purple:#a78bfa;
+    --accent-pink:  #f472b6;
+    --accent-orange:#fb923c;
+    --radius:       10px;
+    --radius-sm:    6px;
+    --shadow:       0 4px 24px rgba(0,0,0,0.3);
+    --transition:   0.2s ease;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    line-height: 1.5;
+  }
+
+  /* ── Auth Overlay ────────────────────────────────────── */
+  .auth-overlay {
+    position: fixed; inset: 0; z-index: 9999;
+    background: var(--bg-primary);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .auth-overlay.hidden { display: none; }
+  .auth-box {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 48px 40px;
+    width: 100%; max-width: 400px;
+    text-align: center;
+  }
+  .auth-box h2 { font-size: 22px; margin-bottom: 6px; font-weight: 700; }
+  .auth-box p { font-size: 13px; color: var(--text-muted); margin-bottom: 28px; }
+  .auth-box input {
+    width: 100%; padding: 11px 16px;
+    background: var(--bg-primary); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--text-primary); font-size: 14px;
+    outline: none; margin-bottom: 16px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    transition: border-color var(--transition);
+  }
+  .auth-box input:focus { border-color: var(--accent-blue); }
+  .auth-box button {
+    width: 100%; padding: 11px;
+    background: var(--accent-blue); color: #fff; border: none;
+    border-radius: 8px; font-size: 14px; font-weight: 600;
+    cursor: pointer; transition: opacity var(--transition);
+  }
+  .auth-box button:hover { opacity: 0.85; }
+  .auth-error {
+    color: var(--accent-red); font-size: 12px;
+    margin-top: 14px; display: none;
+  }
+
+  /* ── Header ──────────────────────────────────────────── */
+  .header {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 28px;
+    display: flex; align-items: center; justify-content: space-between;
+    position: sticky; top: 0; z-index: 100;
+    backdrop-filter: blur(12px);
+  }
+  .header-left { display: flex; align-items: center; gap: 14px; }
+  .header-left h1 { font-size: 16px; font-weight: 700; letter-spacing: -0.3px; }
+  .header-nav { display: flex; gap: 6px; }
+  .header-nav a {
+    font-size: 12px; color: var(--text-muted); text-decoration: none;
+    padding: 5px 12px; border-radius: 6px;
+    transition: all var(--transition);
+  }
+  .header-nav a:hover { background: var(--bg-card); color: var(--text-primary); }
+  .header-nav a.active { background: var(--accent-blue); color: #fff; }
+
+  .badge {
+    font-size: 10px; font-weight: 700; padding: 3px 10px;
+    border-radius: 999px; text-transform: uppercase; letter-spacing: 0.6px;
+  }
+  .badge-online  { background: rgba(52,211,153,0.12); color: var(--accent-green); }
+  .badge-offline { background: rgba(248,113,113,0.12); color: var(--accent-red); }
+
+  .header-right { display: flex; align-items: center; gap: 14px; }
+  .refresh-info { font-size: 11px; color: var(--text-dim); }
+  .dot {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    margin-right: 5px; animation: pulse 2s infinite;
+  }
+  .dot-g { background: var(--accent-green); }
+  .dot-r { background: var(--accent-red); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+
+  /* ── Container ───────────────────────────────────────── */
+  .container { max-width: 1400px; margin: 0 auto; padding: 24px 24px 60px; }
+  .section-title {
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 1.2px; color: var(--text-dim); margin-bottom: 14px;
+  }
+
+  /* ── Stats Row ───────────────────────────────────────── */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px;
+    margin-bottom: 28px;
+  }
+  .stat-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 20px;
+    transition: border-color var(--transition);
+  }
+  .stat-card:hover { border-color: var(--border-light); }
+  .stat-label {
+    font-size: 11px; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
+  }
+  .stat-value {
+    font-size: 26px; font-weight: 800; letter-spacing: -1px; line-height: 1.1;
+  }
+  .stat-sub { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+  .v-green  { color: var(--accent-green); }
+  .v-red    { color: var(--accent-red); }
+  .v-blue   { color: var(--accent-blue); }
+  .v-amber  { color: var(--accent-amber); }
+  .v-purple { color: var(--accent-purple); }
+  .v-cyan   { color: var(--accent-cyan); }
+  .v-pink   { color: var(--accent-pink); }
+
+  /* ── Charts Section ──────────────────────────────────── */
+  .charts-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 28px;
+  }
+  .chart-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 22px 24px;
+  }
+  .chart-card h3 {
+    font-size: 13px; font-weight: 600; margin-bottom: 16px;
+    color: var(--text-muted);
+  }
+
+  /* Score Distribution Bars */
+  .dist-row {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 8px;
+  }
+  .dist-label {
+    font-size: 11px; color: var(--text-muted); width: 48px;
+    text-align: right; flex-shrink: 0;
+  }
+  .dist-track {
+    flex: 1; height: 24px; background: var(--bg-primary);
+    border-radius: 4px; overflow: hidden; position: relative;
+  }
+  .dist-fill {
+    height: 100%; border-radius: 4px;
+    transition: width 0.6s ease;
+    display: flex; align-items: center; padding-left: 8px;
+    font-size: 11px; font-weight: 700; color: #fff;
+    min-width: 0;
+  }
+  .dist-fill.empty { color: var(--text-dim); padding-left: 6px; }
+  .df-1 { background: var(--accent-red); }
+  .df-2 { background: var(--accent-orange); }
+  .df-3 { background: var(--accent-amber); }
+  .df-4 { background: var(--accent-blue); }
+  .df-5 { background: var(--accent-green); }
+
+  /* Score Breakdown Radar (simplified horizontal bars) */
+  .breakdown-row {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 10px;
+  }
+  .breakdown-label {
+    font-size: 11px; color: var(--text-muted); width: 110px;
+    text-align: right; flex-shrink: 0;
+  }
+  .breakdown-track {
+    flex: 1; height: 20px; background: var(--bg-primary);
+    border-radius: 4px; overflow: hidden;
+  }
+  .breakdown-fill {
+    height: 100%; border-radius: 4px;
+    transition: width 0.6s ease;
+    display: flex; align-items: center; justify-content: flex-end;
+    padding-right: 8px;
+    font-size: 10px; font-weight: 700; color: #fff;
+  }
+  .bf-quality    { background: var(--accent-blue); }
+  .bf-reqs       { background: var(--accent-purple); }
+  .bf-output     { background: var(--accent-cyan); }
+  .bf-practices  { background: var(--accent-green); }
+  .bf-final      { background: linear-gradient(90deg, var(--accent-blue), var(--accent-cyan)); }
+
+  /* ── Timeline mini chart ─────────────────────────────── */
+  .timeline-wrap {
+    display: flex; align-items: flex-end; gap: 2px;
+    height: 60px; margin-top: 8px;
+  }
+  .tl-bar {
+    flex: 1; border-radius: 2px 2px 0 0;
+    min-width: 4px; transition: height 0.4s ease;
+    cursor: default; position: relative;
+  }
+  .tl-bar:hover { opacity: 0.8; }
+  .tl-bar.tl-ok   { background: var(--accent-green); }
+  .tl-bar.tl-fail  { background: var(--accent-red); }
+  .tl-bar.tl-empty { background: var(--bg-card-alt); }
+  .tl-tooltip {
+    display: none; position: absolute; bottom: 100%; left: 50%;
+    transform: translateX(-50%); background: var(--bg-card);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 10px; font-size: 10px; white-space: nowrap;
+    z-index: 10; box-shadow: var(--shadow);
+  }
+  .tl-bar:hover .tl-tooltip { display: block; }
+
+  /* ── Evaluation Table ────────────────────────────────── */
+  .table-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin-bottom: 28px;
+  }
+  .table-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 22px;
+    border-bottom: 1px solid var(--border);
+  }
+  .table-header h3 { font-size: 14px; font-weight: 600; }
+  .table-filter {
+    display: flex; gap: 6px;
+  }
+  .filter-btn {
+    font-size: 11px; padding: 4px 12px; border-radius: 6px;
+    border: 1px solid var(--border); background: transparent;
+    color: var(--text-muted); cursor: pointer;
+    transition: all var(--transition);
+  }
+  .filter-btn:hover { border-color: var(--accent-blue); color: var(--text-primary); }
+  .filter-btn.active { background: var(--accent-blue); color: #fff; border-color: var(--accent-blue); }
+
+  .eval-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .eval-table thead th {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.8px; color: var(--text-dim);
+    padding: 10px 16px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-card-alt);
+    position: sticky; top: 0;
+  }
+  .eval-table tbody tr {
+    border-bottom: 1px solid var(--border);
+    transition: background var(--transition);
+    cursor: pointer;
+  }
+  .eval-table tbody tr:hover { background: var(--bg-hover); }
+  .eval-table tbody tr:last-child { border-bottom: none; }
+  .eval-table td {
+    padding: 12px 16px;
+    font-size: 13px;
+    vertical-align: middle;
+  }
+  .eval-table .mono {
+    font-family: 'Consolas', 'Monaco', 'Fira Code', monospace;
+    font-size: 11px; color: var(--text-muted);
+  }
+
+  /* Status Pill */
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; font-weight: 600; padding: 3px 10px;
+    border-radius: 999px;
+  }
+  .sp-success { background: rgba(52,211,153,0.1); color: var(--accent-green); }
+  .sp-failed  { background: rgba(248,113,113,0.1); color: var(--accent-red); }
+  .sp-timeout { background: rgba(251,191,36,0.1);  color: var(--accent-amber); }
+  .sp-busy    { background: rgba(168,85,247,0.1);  color: var(--accent-purple); }
+  .sp-invalid { background: rgba(251,146,60,0.1);  color: var(--accent-orange); }
+
+  /* Score Badge */
+  .score-badge {
+    display: inline-block; font-size: 13px; font-weight: 800;
+    padding: 2px 0; min-width: 32px; text-align: center;
+  }
+  .sb-high { color: var(--accent-green); }
+  .sb-mid  { color: var(--accent-amber); }
+  .sb-low  { color: var(--accent-red); }
+  .sb-none { color: var(--text-dim); }
+
+  /* Duration */
+  .dur-fast { color: var(--accent-green); }
+  .dur-ok   { color: var(--accent-amber); }
+  .dur-slow { color: var(--accent-red); }
+
+  /* ── Detail Panel ────────────────────────────────────── */
+  .detail-overlay {
+    position: fixed; inset: 0; z-index: 500;
+    background: rgba(0,0,0,0.6);
+    display: none; align-items: center; justify-content: center;
+    backdrop-filter: blur(4px);
+  }
+  .detail-overlay.visible { display: flex; }
+  .detail-panel {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    width: 100%; max-width: 640px; max-height: 85vh;
+    overflow-y: auto; padding: 32px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  .detail-panel h2 { font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+  .detail-meta { font-size: 12px; color: var(--text-muted); margin-bottom: 20px; }
+  .detail-scores {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 10px; margin-bottom: 20px;
+  }
+  .detail-score-item {
+    background: var(--bg-primary); border-radius: 8px; padding: 14px 16px;
+  }
+  .detail-score-label { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
+  .detail-score-value { font-size: 24px; font-weight: 800; }
+  .detail-section-title {
+    font-size: 12px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.8px; color: var(--text-dim);
+    margin-bottom: 8px; margin-top: 16px;
+  }
+  .detail-issues {
+    list-style: none; margin-bottom: 12px;
+  }
+  .detail-issues li {
+    font-size: 13px; padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    color: var(--accent-amber);
+  }
+  .detail-issues li::before { content: '⚠ '; }
+  .detail-feedback {
+    background: var(--bg-primary); border-radius: 8px;
+    padding: 16px; font-size: 13px; line-height: 1.65;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+  }
+  .detail-error {
+    background: rgba(248,113,113,0.08); border: 1px solid rgba(248,113,113,0.2);
+    border-radius: 8px; padding: 16px;
+    font-size: 13px; color: var(--accent-red);
+  }
+  .detail-close {
+    display: block; width: 100%; margin-top: 20px; padding: 10px;
+    background: var(--bg-primary); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--text-muted); font-size: 13px;
+    cursor: pointer; transition: all var(--transition);
+  }
+  .detail-close:hover { border-color: var(--accent-blue); color: var(--text-primary); }
+
+  /* ── CPU Device Panel ─────────────────────────────── */
+  .devices-panel {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 28px;
+    overflow: hidden;
+  }
+  .devices-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 22px;
+    border-bottom: 1px solid var(--border);
+  }
+  .devices-header h3 { font-size: 14px; font-weight: 600; }
+  .devices-count {
+    display: flex; align-items: center; gap: 8px;
+  }
+  .device-count-badge {
+    font-size: 12px; font-weight: 700; padding: 3px 12px;
+    border-radius: 999px;
+  }
+  .dcb-online { background: rgba(52,211,153,0.12); color: var(--accent-green); }
+  .dcb-offline { background: rgba(248,113,113,0.12); color: var(--accent-red); }
+  .dcb-none { background: rgba(85,91,112,0.15); color: var(--text-dim); }
+
+  .devices-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+    padding: 16px 22px;
+  }
+  .device-card {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    position: relative;
+    transition: border-color var(--transition);
+  }
+  .device-card:hover { border-color: var(--border-light); }
+  .device-card.dc-online  { border-left: 3px solid var(--accent-green); }
+  .device-card.dc-offline { border-left: 3px solid var(--accent-red); opacity: 0.6; }
+
+  .device-top {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .device-name {
+    font-size: 13px; font-weight: 700;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .device-status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+  }
+  .dsd-online  { background: var(--accent-green); animation: pulse 2s infinite; }
+  .dsd-offline { background: var(--accent-red); }
+
+  .device-status-text {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.6px; padding: 2px 8px;
+    border-radius: 999px;
+  }
+  .dst-online  { background: rgba(52,211,153,0.12); color: var(--accent-green); }
+  .dst-offline { background: rgba(248,113,113,0.12); color: var(--accent-red); }
+
+  .device-meta {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+  .device-meta-item {
+    font-size: 11px;
+  }
+  .device-meta-label {
+    color: var(--text-dim); font-size: 10px;
+  }
+  .device-meta-value {
+    color: var(--text-muted);
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 11px;
+  }
+
+  .no-devices {
+    text-align: center; padding: 32px 24px;
+    color: var(--text-dim); font-size: 13px;
+  }
+  .no-devices .nd-icon {
+    font-size: 32px; margin-bottom: 8px; opacity: 0.4;
+  }
+  .no-devices .nd-hint {
+    font-size: 11px; margin-top: 8px;
+    color: var(--text-dim);
+    font-family: 'Consolas', monospace;
+    background: var(--bg-card-alt); padding: 8px 14px;
+    border-radius: 6px; display: inline-block;
+  }
+
+  /* ── Empty State ─────────────────────────────────────── */
+  .empty-state {
+    text-align: center; padding: 48px 24px;
+    color: var(--text-dim); font-size: 14px;
+  }
+  .empty-state .icon { font-size: 40px; margin-bottom: 12px; opacity: 0.5; }
+
+  /* ── Error Banner ────────────────────────────────────── */
+  .error-banner {
+    background: rgba(248,113,113,0.08);
+    border-bottom: 1px solid rgba(248,113,113,0.2);
+    color: var(--accent-red);
+    padding: 10px 28px;
+    font-size: 12px;
+    display: none;
+    align-items: center; gap: 8px;
+  }
+  .error-banner.visible { display: flex; }
+
+  /* ── Footer ──────────────────────────────────────────── */
+  .footer {
+    text-align: center; padding: 16px;
+    font-size: 10px; color: var(--text-dim);
+    border-top: 1px solid var(--border);
+  }
+
+  /* ── Responsive ──────────────────────────────────────── */
+  @media (max-width: 900px) {
+    .charts-row { grid-template-columns: 1fr; }
+    .detail-scores { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 640px) {
+    .header { padding: 12px 16px; flex-wrap: wrap; gap: 8px; }
+    .container { padding: 16px; }
+    .stats-row { grid-template-columns: 1fr 1fr; }
+    .stat-value { font-size: 22px; }
+    .eval-table { font-size: 12px; }
+    .eval-table td, .eval-table th { padding: 8px 10px; }
+    .detail-panel { margin: 16px; padding: 24px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Auth Overlay -->
+<div class="auth-overlay" id="authOverlay">
+  <div class="auth-box">
+    <h2>📊 Evaluation Monitor</h2>
+    <p>Enter your API key to access evaluation monitoring</p>
+    <input type="password" id="authKeyInput" placeholder="x-api-key" autocomplete="off" spellcheck="false">
+    <button id="authBtn">Authenticate</button>
+    <div class="auth-error" id="authError">Invalid API key — access denied</div>
+  </div>
+</div>
+
+<!-- Header -->
+<header class="header">
+  <div class="header-left">
+    <h1>📊 Evaluation Monitor</h1>
+    <span class="badge badge-online" id="statusBadge">Connecting…</span>
+  </div>
+  <nav class="header-nav">
+    <a href="/internal/dashboard">GPU Hardware</a>
+    <a href="/internal/evaluations/dashboard" class="active">Evaluations</a>
+  </nav>
+  <div class="header-right">
+    <span class="refresh-info">
+      <span class="dot dot-g" id="dotIcon"></span>
+      <span id="lastUpdate">—</span>
+    </span>
+  </div>
+</header>
+
+<!-- Error Banner -->
+<div class="error-banner" id="errorBanner">
+  <span>⚠</span>
+  <span id="errorMsg">Connection failed</span>
+</div>
+
+<!-- Main Content -->
+<main class="container" id="mainContent">
+
+  <!-- Summary Stats -->
+  <div class="section-title">Overview</div>
+
+  <!-- CPU Devices Panel -->
+  <div class="devices-panel">
+    <div class="devices-header">
+      <h3>🖥 Connected CPU Devices</h3>
+      <div class="devices-count">
+        <span class="device-count-badge dcb-none" id="devCountBadge">0 connected</span>
+      </div>
+    </div>
+    <div id="devicesContent">
+      <div class="no-devices">
+        <div class="nd-icon">📡</div>
+        Waiting for CPU devices to connect…
+        <div class="nd-hint">POST /connect with x-api-key to register</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-label">Total Evaluations</div>
+      <div class="stat-value v-blue" id="sTotalEvals">—</div>
+      <div class="stat-sub">All time</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Successful</div>
+      <div class="stat-value v-green" id="sSuccessCount">—</div>
+      <div class="stat-sub" id="sSuccessRate">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Failed</div>
+      <div class="stat-value v-red" id="sFailCount">—</div>
+      <div class="stat-sub" id="sFailTypes">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Avg Score</div>
+      <div class="stat-value v-cyan" id="sAvgScore">—</div>
+      <div class="stat-sub">Across successes</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Avg Duration</div>
+      <div class="stat-value v-amber" id="sAvgDuration">—</div>
+      <div class="stat-sub">Per evaluation</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">1h Success Rate</div>
+      <div class="stat-value v-purple" id="sHourlyRate">—</div>
+      <div class="stat-sub">Last 60 minutes</div>
+    </div>
+  </div>
+
+  <!-- Charts Row -->
+  <div class="section-title">Analytics</div>
+  <div class="charts-row">
+
+    <!-- Score Distribution -->
+    <div class="chart-card">
+      <h3>Score Distribution</h3>
+      <div id="distChart">
+        <div class="dist-row">
+          <div class="dist-label">0–20</div>
+          <div class="dist-track"><div class="dist-fill df-1" id="dist0" style="width:0%"></div></div>
+        </div>
+        <div class="dist-row">
+          <div class="dist-label">21–40</div>
+          <div class="dist-track"><div class="dist-fill df-2" id="dist1" style="width:0%"></div></div>
+        </div>
+        <div class="dist-row">
+          <div class="dist-label">41–60</div>
+          <div class="dist-track"><div class="dist-fill df-3" id="dist2" style="width:0%"></div></div>
+        </div>
+        <div class="dist-row">
+          <div class="dist-label">61–80</div>
+          <div class="dist-track"><div class="dist-fill df-4" id="dist3" style="width:0%"></div></div>
+        </div>
+        <div class="dist-row">
+          <div class="dist-label">81–100</div>
+          <div class="dist-track"><div class="dist-fill df-5" id="dist4" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Average Score Breakdown -->
+    <div class="chart-card">
+      <h3>Average Score Breakdown</h3>
+      <div id="breakdownChart">
+        <div class="breakdown-row">
+          <div class="breakdown-label">Code Quality</div>
+          <div class="breakdown-track"><div class="breakdown-fill bf-quality" id="bCodeQuality" style="width:0%"></div></div>
+        </div>
+        <div class="breakdown-row">
+          <div class="breakdown-label">Key Requirements</div>
+          <div class="breakdown-track"><div class="breakdown-fill bf-reqs" id="bKeyReqs" style="width:0%"></div></div>
+        </div>
+        <div class="breakdown-row">
+          <div class="breakdown-label">Output Correct.</div>
+          <div class="breakdown-track"><div class="breakdown-fill bf-output" id="bOutputCorr" style="width:0%"></div></div>
+        </div>
+        <div class="breakdown-row">
+          <div class="breakdown-label">Best Practices</div>
+          <div class="breakdown-track"><div class="breakdown-fill bf-practices" id="bBestPrac" style="width:0%"></div></div>
+        </div>
+        <div class="breakdown-row">
+          <div class="breakdown-label">Final Score</div>
+          <div class="breakdown-track"><div class="breakdown-fill bf-final" id="bFinalScore" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Timeline -->
+  <div class="section-title">Recent Activity Timeline</div>
+  <div class="chart-card" style="margin-bottom:28px">
+    <h3>Last 50 Evaluations — Duration & Status</h3>
+    <div class="timeline-wrap" id="timeline"></div>
+  </div>
+
+  <!-- Evaluation History Table -->
+  <div class="section-title">Evaluation History</div>
+  <div class="table-card">
+    <div class="table-header">
+      <h3>Recent Evaluations</h3>
+      <div class="table-filter">
+        <button class="filter-btn active" data-filter="all">All</button>
+        <button class="filter-btn" data-filter="success">Success</button>
+        <button class="filter-btn" data-filter="failed">Failed</button>
+        <button class="filter-btn" data-filter="timeout">Timeout</button>
+        <button class="filter-btn" data-filter="invalid">Invalid</button>
+      </div>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="eval-table">
+        <thead>
+          <tr>
+            <th>Status</th>
+            <th>Request ID</th>
+            <th>Score</th>
+            <th>Duration</th>
+            <th>Time</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody id="evalTableBody">
+          <tr>
+            <td colspan="6">
+              <div class="empty-state">
+                <div class="icon">📭</div>
+                No evaluations yet. Submit a request to see results.
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</main>
+
+<!-- Detail Panel Overlay -->
+<div class="detail-overlay" id="detailOverlay">
+  <div class="detail-panel" id="detailPanel">
+    <h2 id="detailTitle">Evaluation Details</h2>
+    <div class="detail-meta" id="detailMeta"></div>
+    <div id="detailContent"></div>
+    <button class="detail-close" id="detailClose">Close</button>
+  </div>
+</div>
+
+<footer class="footer">
+  Evaluation Monitoring Dashboard — Internal Use Only — <span id="footerTime"></span>
+</footer>
+
+<script>
+(function() {
+  'use strict';
+
+  // ── State ────────────────────────────────────────────
+  let apiKey = '';
+  let refreshTimer = null;
+  let allEvals = [];
+  let currentFilter = 'all';
+  const REFRESH_MS = 4000;
+  const BASE_URL = window.location.origin;
+
+  // ── DOM ──────────────────────────────────────────────
+  const $ = id => document.getElementById(id);
+
+  // ── Auth ─────────────────────────────────────────────
+  const savedKey = sessionStorage.getItem('gpu_eval_key');
+  if (savedKey) {
+    apiKey = savedKey;
+    $('authOverlay').classList.add('hidden');
+    startDashboard();
+  }
+
+  $('authBtn').addEventListener('click', attemptAuth);
+  $('authKeyInput').addEventListener('keydown', e => { if (e.key === 'Enter') attemptAuth(); });
+
+  async function attemptAuth() {
+    const key = $('authKeyInput').value.trim();
+    if (!key) return;
+    $('authBtn').textContent = 'Verifying…';
+    $('authBtn').disabled = true;
+    try {
+      const res = await fetch(BASE_URL + '/internal/evaluations', { headers: { 'x-api-key': key } });
+      if (res.ok) {
+        apiKey = key;
+        sessionStorage.setItem('gpu_eval_key', key);
+        $('authOverlay').classList.add('hidden');
+        $('authError').style.display = 'none';
+        startDashboard();
+      } else {
+        $('authError').style.display = 'block';
+      }
+    } catch {
+      $('authError').textContent = 'Connection failed — is the server running?';
+      $('authError').style.display = 'block';
+    } finally {
+      $('authBtn').textContent = 'Authenticate';
+      $('authBtn').disabled = false;
+    }
+  }
+
+  // ── Dashboard Loop ───────────────────────────────────
+  function startDashboard() {
+    fetchData();
+    refreshTimer = setInterval(fetchData, REFRESH_MS);
+  }
+
+  async function fetchData() {
+    try {
+      const res = await fetch(BASE_URL + '/internal/evaluations?limit=200', {
+        headers: { 'x-api-key': apiKey },
+        signal: AbortSignal.timeout(8000),
+      });
+
+      if (res.status === 401) {
+        sessionStorage.removeItem('gpu_eval_key');
+        $('authOverlay').classList.remove('hidden');
+        clearInterval(refreshTimer);
+        return;
+      }
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const data = await res.json();
+      allEvals = data.evaluations || [];
+      const cpuDevices = data.cpuDevices || { total: 0, online: 0, offline: 0, devices: [] };
+      renderStats(data.stats || {});
+      renderDevices(cpuDevices);
+      renderDistribution(data.stats?.scoreDistribution || [0,0,0,0,0]);
+      renderBreakdown(allEvals.filter(e => e.status === 'success'));
+      renderTimeline(allEvals.slice(0, 50));
+      renderTable();
+      hideError();
+      setBadge('online');
+      $('lastUpdate').textContent = 'Updated ' + new Date().toLocaleTimeString();
+      $('footerTime').textContent = new Date().toLocaleString();
+    } catch (err) {
+      showError(err.message || 'Failed to fetch evaluations');
+      setBadge('offline');
+    }
+  }
+
+  // ── Render Stats ─────────────────────────────────────
+  function renderStats(s) {
+    $('sTotalEvals').textContent = fmtNum(s.total || 0);
+    $('sSuccessCount').textContent = fmtNum(s.successes || 0);
+    const total = (s.successes || 0) + (s.failures || 0);
+    const rate = total > 0 ? ((s.successes / total) * 100).toFixed(1) : '100.0';
+    $('sSuccessRate').textContent = rate + '% success rate';
+
+    $('sFailCount').textContent = fmtNum(s.failures || 0);
+    $('sFailTypes').textContent = total > 0 ? ((s.failures / total) * 100).toFixed(1) + '% failure rate' : 'No failures';
+
+    $('sAvgScore').textContent = s.avgScore ?? '—';
+    $('sAvgDuration').textContent = fmtDur(s.avgDuration || 0);
+    $('sHourlyRate').textContent = (s.hourlySuccessRate ?? 100) + '%';
+  }
+
+  // ── Score Distribution ───────────────────────────────
+  function renderDistribution(dist) {
+    const max = Math.max(...dist, 1);
+    for (let i = 0; i < 5; i++) {
+      const el = $('dist' + i);
+      const pct = Math.round((dist[i] / max) * 100);
+      el.style.width = (pct || 0) + '%';
+      el.textContent = dist[i] > 0 ? dist[i] : '';
+      el.classList.toggle('empty', dist[i] === 0);
+    }
+  }
+
+  // ── Avg Score Breakdown ──────────────────────────────
+  function renderBreakdown(successes) {
+    if (successes.length === 0) {
+      ['bCodeQuality','bKeyReqs','bOutputCorr','bBestPrac','bFinalScore'].forEach(id => {
+        $(id).style.width = '0%';
+        $(id).textContent = '';
+      });
+      return;
+    }
+
+    const avg = (field) => {
+      const sum = successes.reduce((a, e) => a + (e.scores?.[field] || 0), 0);
+      return Math.round(sum / successes.length);
+    };
+
+    const fields = [
+      { id: 'bCodeQuality', key: 'code_quality' },
+      { id: 'bKeyReqs',     key: 'key_requirements' },
+      { id: 'bOutputCorr',  key: 'output_correctness' },
+      { id: 'bBestPrac',    key: 'best_practices' },
+      { id: 'bFinalScore',  key: 'final_score' },
+    ];
+
+    fields.forEach(f => {
+      const v = avg(f.key);
+      $(f.id).style.width = v + '%';
+      $(f.id).textContent = v;
+    });
+  }
+
+  // ── Timeline ─────────────────────────────────────────
+  function renderTimeline(evals) {
+    const container = $('timeline');
+    container.innerHTML = '';
+
+    if (evals.length === 0) {
+      for (let i = 0; i < 50; i++) {
+        const bar = document.createElement('div');
+        bar.className = 'tl-bar tl-empty';
+        bar.style.height = '4px';
+        container.appendChild(bar);
+      }
+      return;
+    }
+
+    const maxDur = Math.max(...evals.map(e => e.durationMs || 0), 1);
+    const reversed = [...evals].reverse();
+
+    reversed.forEach(e => {
+      const bar = document.createElement('div');
+      const pct = Math.max(((e.durationMs || 0) / maxDur) * 100, 6);
+      bar.className = 'tl-bar ' + (e.status === 'success' ? 'tl-ok' : 'tl-fail');
+      bar.style.height = pct + '%';
+
+      const tip = document.createElement('div');
+      tip.className = 'tl-tooltip';
+      tip.innerHTML = `<strong>${e.status}</strong><br>${fmtDur(e.durationMs || 0)}` +
+        (e.scores?.final_score != null ? `<br>Score: ${e.scores.final_score}` : '');
+      bar.appendChild(tip);
+      container.appendChild(bar);
+    });
+  }
+
+  // ── Table ────────────────────────────────────────────
+  function renderTable() {
+    const filtered = currentFilter === 'all'
+      ? allEvals
+      : allEvals.filter(e => e.status === currentFilter);
+
+    const tbody = $('evalTableBody');
+
+    if (filtered.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="6">
+        <div class="empty-state">
+          <div class="icon">📭</div>
+          ${currentFilter === 'all' ? 'No evaluations yet.' : 'No ' + currentFilter + ' evaluations found.'}
+        </div>
+      </td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = filtered.map((ev, idx) => {
+      const statusClass = {
+        success: 'sp-success', failed: 'sp-failed',
+        timeout: 'sp-timeout', busy: 'sp-busy', invalid: 'sp-invalid'
+      }[ev.status] || 'sp-failed';
+
+      const statusIcon = {
+        success: '✓', failed: '✕', timeout: '⏱', busy: '⏸', invalid: '⚠'
+      }[ev.status] || '?';
+
+      const score = ev.scores?.final_score;
+      let scoreHtml = '<span class="score-badge sb-none">—</span>';
+      if (score != null) {
+        const sc = score >= 70 ? 'sb-high' : score >= 40 ? 'sb-mid' : 'sb-low';
+        scoreHtml = `<span class="score-badge ${sc}">${score}</span>`;
+      }
+
+      const dur = ev.durationMs || 0;
+      const durClass = dur < 10000 ? 'dur-fast' : dur < 30000 ? 'dur-ok' : 'dur-slow';
+
+      const time = new Date(ev.timestamp);
+      const timeStr = time.toLocaleTimeString();
+      const dateStr = time.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+      return `<tr data-idx="${idx}" onclick="window.__showDetail(${idx})">
+        <td><span class="status-pill ${statusClass}">${statusIcon} ${ev.status}</span></td>
+        <td class="mono">${ev.id || '—'}</td>
+        <td>${scoreHtml}</td>
+        <td><span class="${durClass}">${fmtDur(dur)}</span></td>
+        <td><span style="color:var(--text-muted)">${dateStr}</span> ${timeStr}</td>
+        <td style="color:var(--text-dim);font-size:11px">${ev.error ? truncate(ev.error, 40) : (ev.feedback ? truncate(ev.feedback, 40) : '—')}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // ── Detail Panel ─────────────────────────────────────
+  window.__showDetail = function(idx) {
+    const filtered = currentFilter === 'all'
+      ? allEvals
+      : allEvals.filter(e => e.status === currentFilter);
+    const ev = filtered[idx];
+    if (!ev) return;
+
+    $('detailTitle').textContent = 'Evaluation: ' + (ev.id || 'Unknown');
+    $('detailMeta').innerHTML = `
+      <span class="status-pill ${statusPillClass(ev.status)}">${ev.status}</span> &nbsp;
+      ${new Date(ev.timestamp).toLocaleString()} &nbsp;·&nbsp;
+      Duration: ${fmtDur(ev.durationMs || 0)} &nbsp;·&nbsp;
+      Prompt: ${fmtNum(ev.promptLength || 0)} chars
+    `;
+
+    let html = '';
+
+    if (ev.scores) {
+      html += '<div class="detail-scores">';
+      const scoreItems = [
+        { label: 'Code Quality', val: ev.scores.code_quality },
+        { label: 'Key Requirements', val: ev.scores.key_requirements },
+        { label: 'Output Correctness', val: ev.scores.output_correctness },
+        { label: 'Best Practices', val: ev.scores.best_practices },
+        { label: 'Final Score', val: ev.scores.final_score },
+      ];
+      scoreItems.forEach(s => {
+        const color = s.val >= 70 ? 'var(--accent-green)' : s.val >= 40 ? 'var(--accent-amber)' : 'var(--accent-red)';
+        html += `<div class="detail-score-item">
+          <div class="detail-score-label">${s.label}</div>
+          <div class="detail-score-value" style="color:${color}">${s.val ?? '—'}</div>
+        </div>`;
+      });
+      html += '</div>';
+    }
+
+    if (ev.majorIssues && ev.majorIssues.length > 0) {
+      html += '<div class="detail-section-title">Major Issues</div>';
+      html += '<ul class="detail-issues">';
+      ev.majorIssues.forEach(issue => {
+        html += `<li>${escapeHtml(issue)}</li>`;
+      });
+      html += '</ul>';
+    }
+
+    if (ev.feedback) {
+      html += '<div class="detail-section-title">Feedback</div>';
+      html += `<div class="detail-feedback">${escapeHtml(ev.feedback)}</div>`;
+    }
+
+    if (ev.error) {
+      html += '<div class="detail-section-title">Error</div>';
+      html += `<div class="detail-error">${escapeHtml(ev.error)}</div>`;
+    }
+
+    $('detailContent').innerHTML = html;
+    $('detailOverlay').classList.add('visible');
+  };
+
+  $('detailClose').addEventListener('click', () => {
+    $('detailOverlay').classList.remove('visible');
+  });
+  $('detailOverlay').addEventListener('click', e => {
+    if (e.target === $('detailOverlay')) $('detailOverlay').classList.remove('visible');
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') $('detailOverlay').classList.remove('visible');
+  });
+
+  // ── Filters ──────────────────────────────────────────
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentFilter = btn.dataset.filter;
+      renderTable();
+    });
+  });
+
+  // ── Badge ────────────────────────────────────────────
+  function setBadge(state) {
+    const b = $('statusBadge');
+    const d = $('dotIcon');
+    b.classList.remove('badge-online', 'badge-offline');
+    d.classList.remove('dot-g', 'dot-r');
+    if (state === 'online') {
+      b.textContent = 'Live'; b.classList.add('badge-online'); d.classList.add('dot-g');
+    } else {
+      b.textContent = 'Offline'; b.classList.add('badge-offline'); d.classList.add('dot-r');
+    }
+  }
+
+  // ── Error Banner ─────────────────────────────────────
+  function showError(msg) { $('errorMsg').textContent = msg; $('errorBanner').classList.add('visible'); }
+  function hideError() { $('errorBanner').classList.remove('visible'); }
+
+  // ── Render CPU Devices ────────────────────────────────
+  function renderDevices(cpuData) {
+    const badge = $('devCountBadge');
+    const container = $('devicesContent');
+    const devices = cpuData.devices || [];
+    const onlineCount = cpuData.online || 0;
+    const totalCount = cpuData.total || 0;
+
+    // Update badge
+    badge.className = 'device-count-badge';
+    if (onlineCount > 0) {
+      badge.textContent = onlineCount + ' online';
+      badge.classList.add('dcb-online');
+    } else if (totalCount > 0) {
+      badge.textContent = '0 online';
+      badge.classList.add('dcb-offline');
+    } else {
+      badge.textContent = '0 connected';
+      badge.classList.add('dcb-none');
+    }
+
+    if (devices.length === 0) {
+      container.innerHTML = `
+        <div class="no-devices">
+          <div class="nd-icon">📡</div>
+          Waiting for CPU devices to connect…
+          <div class="nd-hint">POST /connect with x-api-key to register</div>
+        </div>`;
+      return;
+    }
+
+    let html = '<div class="devices-grid">';
+    devices.forEach(d => {
+      const isOnline = d.status === 'online';
+      const statusClass = isOnline ? 'dc-online' : 'dc-offline';
+      const dotClass = isOnline ? 'dsd-online' : 'dsd-offline';
+      const textClass = isOnline ? 'dst-online' : 'dst-offline';
+      const statusLabel = isOnline ? 'ONLINE' : 'OFFLINE';
+      const lastBeat = d.lastHeartbeat ? timeSince(new Date(d.lastHeartbeat)) : 'never';
+      const connectedAt = d.connectedAt ? new Date(d.connectedAt).toLocaleTimeString() : '—';
+
+      html += `
+        <div class="device-card ${statusClass}">
+          <div class="device-top">
+            <div class="device-name">
+              <span class="device-status-dot ${dotClass}"></span>
+              ${escapeHtml(d.deviceId || 'unknown')}
+            </div>
+            <span class="device-status-text ${textClass}">${statusLabel}</span>
+          </div>
+          <div class="device-meta">
+            <div class="device-meta-item">
+              <div class="device-meta-label">IP Address</div>
+              <div class="device-meta-value">${escapeHtml(d.ip || '—')}</div>
+            </div>
+            <div class="device-meta-item">
+              <div class="device-meta-label">Hostname</div>
+              <div class="device-meta-value">${escapeHtml(d.hostname || '—')}</div>
+            </div>
+            <div class="device-meta-item">
+              <div class="device-meta-label">Last Heartbeat</div>
+              <div class="device-meta-value">${lastBeat}</div>
+            </div>
+            <div class="device-meta-item">
+              <div class="device-meta-label">Connected Since</div>
+              <div class="device-meta-value">${connectedAt}</div>
+            </div>
+            <div class="device-meta-item">
+              <div class="device-meta-label">Requests Sent</div>
+              <div class="device-meta-value">${fmtNum(d.totalRequests || 0)}</div>
+            </div>
+            <div class="device-meta-item">
+              <div class="device-meta-label">Version</div>
+              <div class="device-meta-value">${escapeHtml(d.version || '—')}</div>
+            </div>
+          </div>
+        </div>`;
+    });
+    html += '</div>';
+    container.innerHTML = html;
+  }
+
+  function timeSince(date) {
+    const secs = Math.floor((Date.now() - date.getTime()) / 1000);
+    if (secs < 5) return 'just now';
+    if (secs < 60) return secs + 's ago';
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return mins + 'm ago';
+    const hrs = Math.floor(mins / 60);
+    return hrs + 'h ago';
+  }
+
+  // ── Helpers ──────────────────────────────────────────
+  function fmtNum(n) { return Number(n).toLocaleString(); }
+
+  function fmtDur(ms) {
+    if (ms < 1000) return ms + 'ms';
+    if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+    const m = Math.floor(ms / 60000);
+    const s = Math.round((ms % 60000) / 1000);
+    return m + 'm ' + s + 's';
+  }
+
+  function truncate(str, len) {
+    if (!str) return '';
+    return str.length > len ? str.slice(0, len) + '…' : str;
+  }
+
+  function escapeHtml(str) {
+    const d = document.createElement('div');
+    d.textContent = str || '';
+    return d.innerHTML;
+  }
+
+  function statusPillClass(status) {
+    return { success:'sp-success', failed:'sp-failed', timeout:'sp-timeout', busy:'sp-busy', invalid:'sp-invalid' }[status] || 'sp-failed';
+  }
+
+})();
+</script>
+</body>
+</html>

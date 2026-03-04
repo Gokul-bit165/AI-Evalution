@@ -135,6 +135,160 @@ class RequestMetrics {
 const requestMetrics = new RequestMetrics();
 
 // =============================================================================
+// EVALUATION HISTORY TRACKER
+// =============================================================================
+
+class EvaluationHistory {
+  constructor(maxEntries = 200) {
+    this.maxEntries = maxEntries;
+    this.evaluations = [];
+  }
+
+  record(entry) {
+    this.evaluations.unshift({
+      id: entry.requestId,
+      timestamp: new Date().toISOString(),
+      status: entry.status,           // 'success' | 'failed' | 'timeout' | 'busy' | 'invalid'
+      durationMs: entry.durationMs || 0,
+      scores: entry.scores || null,    // { code_quality, key_requirements, output_correctness, best_practices, final_score }
+      feedback: entry.feedback || null,
+      majorIssues: entry.majorIssues || [],
+      error: entry.error || null,
+      promptLength: entry.promptLength || 0,
+    });
+
+    if (this.evaluations.length > this.maxEntries) {
+      this.evaluations.pop();
+    }
+  }
+
+  getRecent(limit = 50) {
+    return this.evaluations.slice(0, limit);
+  }
+
+  getStats() {
+    const total = this.evaluations.length;
+    const successes = this.evaluations.filter(e => e.status === 'success');
+    const failures = this.evaluations.filter(e => e.status !== 'success');
+
+    const avgScore = successes.length > 0
+      ? Math.round(successes.reduce((sum, e) => sum + (e.scores?.final_score || 0), 0) / successes.length)
+      : 0;
+
+    const avgDuration = successes.length > 0
+      ? Math.round(successes.reduce((sum, e) => sum + e.durationMs, 0) / successes.length)
+      : 0;
+
+    // Score distribution buckets: 0-20, 21-40, 41-60, 61-80, 81-100
+    const distribution = [0, 0, 0, 0, 0];
+    successes.forEach(e => {
+      const s = e.scores?.final_score || 0;
+      if (s <= 20) distribution[0]++;
+      else if (s <= 40) distribution[1]++;
+      else if (s <= 60) distribution[2]++;
+      else if (s <= 80) distribution[3]++;
+      else distribution[4]++;
+    });
+
+    // Last 1 hour success rate
+    const oneHourAgo = Date.now() - 3600000;
+    const recent = this.evaluations.filter(e => new Date(e.timestamp).getTime() > oneHourAgo);
+    const recentSuccess = recent.filter(e => e.status === 'success').length;
+    const hourlyRate = recent.length > 0 ? Math.round((recentSuccess / recent.length) * 100) : 100;
+
+    return {
+      total,
+      successes: successes.length,
+      failures: failures.length,
+      avgScore,
+      avgDuration,
+      scoreDistribution: distribution,
+      hourlySuccessRate: hourlyRate,
+    };
+  }
+}
+
+const evaluationHistory = new EvaluationHistory(200);
+
+// =============================================================================
+// CPU DEVICE CONNECTION TRACKER
+// =============================================================================
+
+class CpuDeviceTracker {
+  constructor(staleAfterMs = 30000) {
+    this.staleAfterMs = staleAfterMs; // Consider device offline after 30s
+    this.devices = new Map(); // Map<deviceId, deviceInfo>
+  }
+
+  register(deviceId, meta = {}) {
+    const now = Date.now();
+    const existing = this.devices.get(deviceId);
+
+    this.devices.set(deviceId, {
+      deviceId,
+      ip: meta.ip || 'unknown',
+      hostname: meta.hostname || 'unknown',
+      version: meta.version || 'unknown',
+      connectedAt: existing?.connectedAt || new Date(now).toISOString(),
+      lastHeartbeat: new Date(now).toISOString(),
+      lastHeartbeatTs: now,
+      totalRequests: existing?.totalRequests || 0,
+      status: 'online',
+    });
+
+    logger.info({ deviceId, ip: meta.ip }, 'CPU device connected');
+    return this.devices.get(deviceId);
+  }
+
+  heartbeat(deviceId) {
+    const device = this.devices.get(deviceId);
+    if (!device) return null;
+    const now = Date.now();
+    device.lastHeartbeat = new Date(now).toISOString();
+    device.lastHeartbeatTs = now;
+    device.status = 'online';
+    return device;
+  }
+
+  recordRequest(deviceId) {
+    const device = this.devices.get(deviceId);
+    if (device) device.totalRequests++;
+  }
+
+  getAll() {
+    const now = Date.now();
+    const results = [];
+    for (const [id, device] of this.devices) {
+      const isStale = (now - device.lastHeartbeatTs) > this.staleAfterMs;
+      if (isStale) device.status = 'offline';
+      results.push({ ...device });
+    }
+    return results;
+  }
+
+  getOnlineCount() {
+    const now = Date.now();
+    let count = 0;
+    for (const [, device] of this.devices) {
+      if ((now - device.lastHeartbeatTs) <= this.staleAfterMs) count++;
+    }
+    return count;
+  }
+
+  getSummary() {
+    const all = this.getAll();
+    return {
+      total: all.length,
+      online: all.filter(d => d.status === 'online').length,
+      offline: all.filter(d => d.status === 'offline').length,
+      devices: all,
+    };
+  }
+}
+
+const cpuDeviceTracker = new CpuDeviceTracker(30000);
+
+// =============================================================================
 // GPU METRICS COLLECTOR (spawn-based, no memory buffering)
 // =============================================================================
 
@@ -444,12 +598,59 @@ function authenticate(req, res, next) {
 // Health check (no auth required)
 app.get('/health', (req, res) => {
   const stats = concurrencyGuard.getStats();
+  const cpuSummary = cpuDeviceTracker.getSummary();
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     concurrency: stats,
+    cpuDevices: {
+      online: cpuSummary.online,
+      total: cpuSummary.total,
+    },
   });
+});
+
+// CPU device connection + heartbeat (authenticated)
+app.post('/connect', authenticate, (req, res) => {
+  const deviceId = req.body.deviceId || `cpu_${req.ip}_${Date.now()}`;
+  const meta = {
+    ip: req.ip || req.connection?.remoteAddress || 'unknown',
+    hostname: req.body.hostname || 'unknown',
+    version: req.body.version || 'unknown',
+  };
+
+  const device = cpuDeviceTracker.register(deviceId, meta);
+
+  logger.info({ deviceId, ip: meta.ip }, 'CPU device registered');
+
+  res.json({
+    status: 'connected',
+    deviceId: device.deviceId,
+    message: 'CPU device registered. Send heartbeat every 15s to /heartbeat.',
+    heartbeatInterval: 15000,
+  });
+});
+
+app.post('/heartbeat', authenticate, (req, res) => {
+  const deviceId = req.body.deviceId;
+  if (!deviceId) {
+    return res.status(400).json({ error: 'Missing deviceId' });
+  }
+
+  const device = cpuDeviceTracker.heartbeat(deviceId);
+  if (!device) {
+    // Auto-register if unknown
+    const meta = {
+      ip: req.ip || req.connection?.remoteAddress || 'unknown',
+      hostname: req.body.hostname || 'unknown',
+      version: req.body.version || 'unknown',
+    };
+    cpuDeviceTracker.register(deviceId, meta);
+    return res.json({ status: 'reconnected', deviceId });
+  }
+
+  res.json({ status: 'ok', deviceId });
 });
 
 // Main evaluation endpoint
@@ -496,6 +697,13 @@ app.post('/evaluate', authenticate, async (req, res) => {
   // Concurrency check
   if (!concurrencyGuard.tryAcquire()) {
     logger.warn({ requestId }, 'Concurrency limit reached');
+    evaluationHistory.record({
+      requestId,
+      status: 'busy',
+      durationMs: 0,
+      error: 'Server busy — concurrency limit reached',
+      promptLength: prompt.length,
+    });
     return res.status(503).json({
       error: 'Service Unavailable',
       message: 'Server busy, please retry',
@@ -519,6 +727,14 @@ app.post('/evaluate', authenticate, async (req, res) => {
       );
       requestMetrics.recordFailure(duration);
 
+      evaluationHistory.record({
+        requestId,
+        status: ollamaResult.code === 'TIMEOUT' ? 'timeout' : 'failed',
+        durationMs: duration,
+        error: ollamaResult.error,
+        promptLength: prompt.length,
+      });
+
       const statusCode = ollamaResult.code === 'TIMEOUT' ? 504 : 502;
       return res.status(statusCode).json({
         error: ollamaResult.code === 'TIMEOUT' ? 'Gateway Timeout' : 'Bad Gateway',
@@ -537,6 +753,13 @@ app.post('/evaluate', authenticate, async (req, res) => {
         'Failed to extract JSON from response'
       );
       requestMetrics.recordFailure(duration);
+      evaluationHistory.record({
+        requestId,
+        status: 'invalid',
+        durationMs: duration,
+        error: 'Failed to parse LLM response as JSON',
+        promptLength: prompt.length,
+      });
       return res.status(500).json({
         error: 'Internal Server Error',
         message: 'Failed to parse LLM response as JSON',
@@ -549,6 +772,13 @@ app.post('/evaluate', authenticate, async (req, res) => {
     if (!validation.valid) {
       logger.error({ requestId, validationError: validation.error }, 'Invalid response structure');
       requestMetrics.recordFailure(duration);
+      evaluationHistory.record({
+        requestId,
+        status: 'invalid',
+        durationMs: duration,
+        error: `Invalid response structure: ${validation.error}`,
+        promptLength: prompt.length,
+      });
       return res.status(500).json({
         error: 'Internal Server Error',
         message: `Invalid response structure: ${validation.error}`,
@@ -558,6 +788,22 @@ app.post('/evaluate', authenticate, async (req, res) => {
 
     logger.info({ requestId, finalScore: validation.data.final_score, duration }, 'Evaluation complete');
     requestMetrics.recordSuccess(duration);
+
+    evaluationHistory.record({
+      requestId,
+      status: 'success',
+      durationMs: duration,
+      scores: {
+        code_quality: validation.data.code_quality,
+        key_requirements: validation.data.key_requirements,
+        output_correctness: validation.data.output_correctness,
+        best_practices: validation.data.best_practices,
+        final_score: validation.data.final_score,
+      },
+      feedback: validation.data.feedback,
+      majorIssues: validation.data.major_issues,
+      promptLength: prompt.length,
+    });
 
     return res.json(validation.data);
   } catch (error) {
@@ -606,8 +852,14 @@ app.get('/internal/status', authenticate, (req, res) => {
     averageResponseTime: metrics.averageResponseTime,
     totalRejected: guard.totalRejected,
     memoryUsageMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
+    cpuDevices: cpuDeviceTracker.getSummary(),
     timestamp: new Date().toISOString(),
   });
+});
+
+// CPU device status (for dashboard)
+app.get('/internal/devices', authenticate, (req, res) => {
+  res.json(cpuDeviceTracker.getSummary());
 });
 
 // GPU metrics (cached — 3s TTL prevents nvidia-smi storms)
@@ -624,9 +876,24 @@ app.get('/internal/gpu', authenticate, async (req, res) => {
   }
 });
 
+// Evaluation history endpoints
+app.get('/internal/evaluations', authenticate, (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+  res.json({
+    evaluations: evaluationHistory.getRecent(limit),
+    stats: evaluationHistory.getStats(),
+    cpuDevices: cpuDeviceTracker.getSummary(),
+  });
+});
+
 // Dashboard (served as static HTML — auth checked by frontend via API calls)
 app.get('/internal/dashboard', (req, res) => {
   res.sendFile(path.join(__dirname, 'dashboard.html'));
+});
+
+// Evaluation monitoring dashboard
+app.get('/internal/evaluations/dashboard', (req, res) => {
+  res.sendFile(path.join(__dirname, 'eval-dashboard.html'));
 });
 
 // 404 handler

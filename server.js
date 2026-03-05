@@ -657,7 +657,20 @@ app.post('/heartbeat', authenticate, (req, res) => {
 app.post('/evaluate', authenticate, async (req, res) => {
   const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-  logger.info({ requestId }, 'Evaluation request received');
+  // Auto-register calling device
+  const callerIp = req.ip || req.connection?.remoteAddress || 'unknown';
+  const deviceId = req.headers['x-device-id'] || `cpu_${callerIp}`;
+  const existingDevice = cpuDeviceTracker.heartbeat(deviceId);
+  if (!existingDevice) {
+    cpuDeviceTracker.register(deviceId, {
+      ip: callerIp,
+      hostname: req.headers['x-device-hostname'] || callerIp,
+      version: req.headers['x-device-version'] || 'auto',
+    });
+  }
+  cpuDeviceTracker.recordRequest(deviceId);
+
+  logger.info({ requestId, deviceId }, 'Evaluation request received');
 
   // Validate request body
   if (!req.body || typeof req.body !== 'object') {

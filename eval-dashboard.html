@@ -669,10 +669,6 @@
           <div class="breakdown-track"><div class="breakdown-fill bf-output" id="bOutputCorr" style="width:0%"></div></div>
         </div>
         <div class="breakdown-row">
-          <div class="breakdown-label">Best Practices</div>
-          <div class="breakdown-track"><div class="breakdown-fill bf-practices" id="bBestPrac" style="width:0%"></div></div>
-        </div>
-        <div class="breakdown-row">
           <div class="breakdown-label">Final Score</div>
           <div class="breakdown-track"><div class="breakdown-fill bf-final" id="bFinalScore" style="width:0%"></div></div>
         </div>
@@ -866,7 +862,7 @@
   // ── Avg Score Breakdown ──────────────────────────────
   function renderBreakdown(successes) {
     if (successes.length === 0) {
-      ['bCodeQuality','bKeyReqs','bOutputCorr','bBestPrac','bFinalScore'].forEach(id => {
+      ['bCodeQuality','bKeyReqs','bOutputCorr','bFinalScore'].forEach(id => {
         $(id).style.width = '0%';
         $(id).textContent = '';
       });
@@ -882,7 +878,6 @@
       { id: 'bCodeQuality', key: 'code_quality' },
       { id: 'bKeyReqs',     key: 'key_requirements' },
       { id: 'bOutputCorr',  key: 'output_correctness' },
-      { id: 'bBestPrac',    key: 'best_practices' },
       { id: 'bFinalScore',  key: 'final_score' },
     ];
 
@@ -1003,7 +998,6 @@
         { label: 'Code Quality', val: ev.scores.code_quality },
         { label: 'Key Requirements', val: ev.scores.key_requirements },
         { label: 'Output Correctness', val: ev.scores.output_correctness },
-        { label: 'Best Practices', val: ev.scores.best_practices },
         { label: 'Final Score', val: ev.scores.final_score },
       ];
       scoreItems.forEach(s => {
